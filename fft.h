@@ -35,16 +35,17 @@ template <class T>
 class Fft{
 public:
   enum windowFunc {NONE=0, HAMMING, BLACKMAN_HARRIS, MULTITAPER};
-  Fft(size_t winSize, windowFunc winf_, size_t frq_, size_t numTapers=5);
+  Fft(size_t winSize, windowFunc winf_, size_t frq_, size_t numChannels=1,
+      size_t numTapers=5);
   ~Fft();
-  void AddPoint(T p);
+  void AddPoints(std::vector<T>& p);
   bool Process();
-  void GetPower(std::vector<T>& pow);
-  void GetPhase(std::vector<T>& pha, unsigned long tidx,
-                std::vector<T>* phaseShift=NULL);
+  void GetPower(std::vector<std::vector<T> >& pow);
+  void GetPhase(std::vector<std::vector<T> >& pha, std::vector<T>* phaseShift=NULL);
 private:
-  boost::circular_buffer<T> buffer;
-  fftw_complex *out;
+  std::vector<boost::circular_buffer<T> > buffer;
+  fftw_complex* out;
+  std::vector<fftw_complex*> outVec;
   T* in;
   T* inTmp;
   T* winFunc;
@@ -65,8 +66,9 @@ template<class T>
 const std::string Fft<T>::dpssValues = "dpss_V_102_5";
 
 template<class T>
-Fft<T>::Fft(size_t winSize, windowFunc winf_, size_t frq_, size_t numTapers) :
-  buffer(winSize), winf(winf_), frq(frq_) {
+Fft<T>::Fft(size_t winSize, windowFunc winf_, size_t frq_, size_t numChannels,
+            size_t numTapers) :
+  winf(winf_), frq(frq_) {
   out = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * ((winSize/2)+1) );
   in = (T*)fftw_malloc(sizeof(T) * winSize);
   inTmp = (T*)fftw_malloc(sizeof(T) * winSize);
@@ -115,6 +117,12 @@ Fft<T>::Fft(size_t winSize, windowFunc winf_, size_t frq_, size_t numTapers) :
   } else {
     winFuncSum = winSize/2+1;
   }
+  outVec.resize(numChannels);
+  buffer.resize(numChannels);
+  for (size_t i=0; i<buffer.size(); i++) {
+    buffer[i].set_capacity(winSize);
+    outVec[i] = (fftw_complex *)fftw_malloc(sizeof(fftw_complex) * (winSize/2+1) );
+  }
 }
 
 template<class T>
@@ -127,74 +135,86 @@ Fft<T>::~Fft() {
 }
 
 template<class T>
-void Fft<T>::AddPoint(T p) {
-  buffer.push_back(p);
+void Fft<T>::AddPoints(std::vector<T>& p) {
+  for (size_t i=0; i<p.size(); i++)
+    buffer[i].push_back(p[i]);
 }
 
 template<class T>
 bool Fft<T>::Process() {
-  if (buffer.size() < buffer.capacity())
+  if (buffer[0].size() < buffer[0].capacity())
     return false;
 
   if (winf == windowFunc::MULTITAPER) {
-    memcpy(inTmp, buffer.linearize(), sizeof(T)*buffer.capacity());
+    for (size_t sig=0; sig<buffer.size(); sig++) {
+      memcpy(inTmp, buffer[sig].linearize(), sizeof(T)*buffer[sig].capacity());
 
-    const size_t nc = buffer.capacity()/2+1;
-    std::vector<T> outTmpRe(nc);
-    std::vector<T> outTmpIm(nc);
-    for (size_t j = 0; j < nc; j++) {
-      outTmpRe[j] = outTmpIm[j] = 0.0;
-    }
-    for (size_t i=0; i<tapers.size(); i++){
-      for (size_t j=0; j<buffer.capacity(); j++)
-        in[j] = inTmp[j] * tapers[i][j];
-      fftw_execute(plan_forward);
+      const size_t nc = buffer[sig].capacity()/2+1;
+      std::vector<T> outTmpRe(nc);
+      std::vector<T> outTmpIm(nc);
       for (size_t j = 0; j < nc; j++) {
-        outTmpRe[j] += out[j][0]*tapersWeights[i]/T(tapers.size());
-        outTmpIm[j] += out[j][1]*tapersWeights[i]/T(tapers.size());
+        outTmpRe[j] = outTmpIm[j] = 0.0;
+      }
+      for (size_t i=0; i<tapers.size(); i++){
+        for (size_t j=0; j<buffer[sig].capacity(); j++)
+          in[j] = inTmp[j] * tapers[i][j];
+        fftw_execute(plan_forward);
+        for (size_t j = 0; j < nc; j++) {
+          outTmpRe[j] += out[j][0]*tapersWeights[i]/T(tapers.size());
+          outTmpIm[j] += out[j][1]*tapersWeights[i]/T(tapers.size());
+        }
+      }
+      for (size_t i = 0; i < nc; i++) {
+        out[i][0] = outTmpRe[i];
+        out[i][1] = outTmpIm[i];
       }
     }
-    for (size_t i = 0; i < nc; i++) {
-      out[i][0] = outTmpRe[i];
-      out[i][1] = outTmpIm[i];
-    }
   } else if (winf != windowFunc::NONE) {
-    memcpy(in, buffer.linearize(), sizeof(T)*buffer.capacity());
-    for (size_t i=0; i<buffer.capacity(); i++)
-      in[i] *= winFunc[i];
-    fftw_execute(plan_forward);
+    for (size_t sig=0; sig<buffer.size(); sig++) {
+      const size_t nc = buffer[sig].capacity()/2+1;
+      memcpy(in, buffer[sig].linearize(), sizeof(T)*buffer[sig].capacity());
+      for (size_t i=0; i<buffer[sig].capacity(); i++)
+        in[i] *= winFunc[i];
+      fftw_execute(plan_forward);
+      memcpy(outVec[sig], out, sizeof(fftw_complex)*nc);
+    }
   }
 
   return true;
 }
 
 
+// TODO: move ifs outside sig loop
 template<class T>
-void Fft<T>::GetPower(std::vector<T> &pow) {
-  const size_t nc = buffer.capacity()/2+1;
-  if (winf == windowFunc::MULTITAPER)
-    for (size_t i = 0; i < nc; i++)
-      pow[i] = sqrt(out[i][0]*out[i][0] + out[i][1]*out[i][1]) / 2.0;
-  else if (winf != windowFunc::NONE)
-    for (size_t i = 0; i < nc; i++)
-      pow[i] = sqrt(out[i][0]*out[i][0] + out[i][1]*out[i][1]) / winFuncSum*2.0;
-  else
-    for (size_t i = 0; i < nc; i++)
-      pow[i] = sqrt(out[i][0]*out[i][0] + out[i][1]*out[i][1]) / float(nc);
+void Fft<T>::GetPower(std::vector<std::vector<T> >& pow) {
+  const size_t nc = buffer[0].capacity()/2+1;
+  for (size_t sig=0; sig<buffer.size(); sig++) {
+    if (winf == windowFunc::MULTITAPER) {
+      for (size_t i = 0; i < nc; i++)
+        pow[sig][i] = sqrt(outVec[sig][i][0]*outVec[sig][i][0] + outVec[sig][i][1]*outVec[sig][i][1]) / 2.0;
+    } else if (winf != windowFunc::NONE) {
+      for (size_t i = 0; i < nc; i++) {
+        pow[sig][i] = sqrt(outVec[sig][i][0]*outVec[sig][i][0] + outVec[sig][i][1]*outVec[sig][i][1]) / winFuncSum*2.0;
+
+      }
+    } else
+      for (size_t i = 0; i < nc; i++)
+        pow[sig][i] = sqrt(outVec[sig][i][0]*outVec[sig][i][0] + outVec[sig][i][1]*outVec[sig][i][1]) / float(nc);
+  }
 }
 
 template<class T>
-void Fft<T>::GetPhase(std::vector<T>& pha, unsigned long tidx,
+void Fft<T>::GetPhase(std::vector<std::vector<T> >& pha,
                       std::vector<T>* phaseShift) {
-  const size_t nc = buffer.capacity()/2+1;
-  for (size_t i = 0; i < nc; i++ ) {
-    pha[i] = atan2(out[i][1], out[i][0]) -
-        (tidx % buffer.capacity()) / float(buffer.capacity()*buffer.capacity())
-        * i * 2.0*M_PI;
+  const size_t nc = buffer[0].capacity()/2+1;
+  for (size_t sig=0; sig<buffer.size(); sig++) {
+    for (size_t i = 0; i < nc; i++ ) {
+      pha[sig][i] = atan2(outVec[sig][i][1], outVec[sig][i][0]);
 
-    if (phaseShift) {
-      float por = float(i)/float(nc-1);
-      (*phaseShift)[i] = por*M_PI;
+      if (phaseShift && sig==0) {
+        float por = float(i)/float(nc-1);
+        (*phaseShift)[i] = por*M_PI;
+      }
     }
   }
 }

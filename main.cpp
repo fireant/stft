@@ -28,6 +28,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.*/
 #include <string.h> // memcpy
 #include <string>
 
+#include "fftw/fftw3_mkl.h"
 #include "fft.h"
 
 //#define NDEBUG
@@ -41,48 +42,72 @@ void SignalSpectro(double (*funcp)(double), double (*funcp2)(double)) {
   ofstream phaseFile("phase.csv");
   ofstream signalFile("signal.csv");
 
-  size_t sampling_frq = 256; // Hz
-  size_t dft_points = 102; // points
+  size_t numChannels = 50;
+  size_t sampling_frq = 1024; // Hz
+  size_t dft_points = 256; // points
 
-  Fft<double> fft(dft_points, Fft<double>::windowFunc::HAMMING, sampling_frq);
+  Fft<double> fft(dft_points, Fft<double>::windowFunc::HAMMING, sampling_frq, numChannels);
 
-  vector<double> powers(dft_points/2+1);
-  vector<double> phases(dft_points/2+1);
+  vector<vector<double> > powers(numChannels);
+  vector<vector<double> > phases(numChannels);
+  for (size_t i=0; i<numChannels; i++) {
+    powers[i].resize(dft_points/2+1);
+    phases[i].resize(dft_points/2+1);
+  }
 
   float signal_power = 10.0f;
   float signal_phase = 0;
   float signal_frq = 62.0f; // Hz
-
-  // 1 second signal
-  double point;
-  for (size_t i = 0; i <= sampling_frq; i++ ) {
-    if (i<sampling_frq/2)
-      point = (*funcp)(2.0*M_PI * float(i)/float(sampling_frq)
-                          * signal_frq - signal_phase/float(sampling_frq) * signal_frq) * signal_power;
-    else
-      point = (*funcp2)(2.0*M_PI * float(i)/float(sampling_frq)
-                          * signal_frq - signal_phase/float(sampling_frq) * signal_frq) * signal_power;
-
-    fft.AddPoint(point);
-    signalFile<<float(i)/float(sampling_frq)<<","<<point<<endl;
+  float signal_frq2 = 40.0f; // Hz
 
 #ifndef NDEBUG
-    auto start = std::chrono::high_resolution_clock::now();
+  duration<double> totalTime = duration<double>::zero();
+  size_t iters = 0;
+#endif
+
+  // 1 second signal
+  vector<double> point(numChannels);
+  for (size_t i = 0; i <= sampling_frq; i++ ) {
+    signalFile<<float(i)/float(sampling_frq);
+    for (size_t sig=0; sig<numChannels; sig++) {
+      if (sig<numChannels/2)
+        point[sig] = (*funcp)(2.0*M_PI * float(i)/float(sampling_frq)
+                            * signal_frq - signal_phase/float(sampling_frq) * signal_frq) * signal_power;
+      else
+        point[sig] = (*funcp2)(2.0*M_PI * float(i)/float(sampling_frq)
+                            * signal_frq2 - signal_phase/float(sampling_frq) * signal_frq2) * signal_power;
+
+      signalFile<<","<<point[sig];
+    }
+    signalFile<<endl;
+
+    fft.AddPoints(point);
+
+#ifndef NDEBUG
+    auto start = high_resolution_clock::now();
 #endif
     if (fft.Process()) {
       fft.GetPower(powers);
-      fft.GetPhase(phases, i);
+      fft.GetPhase(phases);
 
 #ifndef NDEBUG
       auto end = high_resolution_clock::now();
       nanoseconds ns = duration_cast<nanoseconds>(end - start);
       cout<<"Elapsed nanosecs: "<<ns.count()<<endl;
+      totalTime += ns;
+      iters += 1;
 #endif
 
-      for (size_t j=0; j<powers.size(); j++) {
-        cout<<i<<"\t"<<j<<"\tpower: "<<powers[j]<<"\tphase: "<<phases[j]<<endl;
-        spectroFile<<powers[j]<<",";
-        phaseFile<<phases[j]<<",";
+      for (size_t j=0; j<powers[0].size(); j++) {
+        double phase = 0.0;
+        double power = 0.0;
+        for (size_t sig=0; sig<numChannels; sig++) {
+          power += powers[sig][j];
+          phase += phases[sig][j] * power;
+        }
+        cout<<i<<"\t"<<j<<"\tpower: "<<power<<"\tphase: "<<phase<<endl;
+        spectroFile<<power<<",";
+        phaseFile<<phase<<",";
       }
       spectroFile<<endl;
       phaseFile<<endl;
@@ -90,14 +115,18 @@ void SignalSpectro(double (*funcp)(double), double (*funcp2)(double)) {
   }
   spectroFile.close();
   phaseFile.close();
+#ifndef NDEBUG
+  cout<<"Average time: "<<totalTime.count()<<"  : "<<iters<<endl;
+#endif
 }
 
 int main()
 {
   SignalSpectro(cos,cos);
 
-  int ret = system("matlab -nodesktop -r \"plots;quit\"");
-  ret = system("reset");
+  int ret = 0;
+  //ret = system("matlab -nodesktop -nosplash -r \"plots;quit\"");
+  //ret = system("reset");
 
   return ret;
 }
