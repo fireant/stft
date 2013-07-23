@@ -44,7 +44,7 @@ void SignalSpectro(double (*funcp)(double), double (*funcp2)(double)) {
   size_t sampling_frq = 256; // Hz
   size_t dft_points = 102; // points
 
-  Fft<double> fft(dft_points, Fft<double>::windowFunc::MULTITAPER, sampling_frq);
+  Fft<double> fft(dft_points, Fft<double>::windowFunc::HAMMING, sampling_frq);
 
   vector<double> powers(dft_points/2+1);
   vector<double> phases(dft_points/2+1);
